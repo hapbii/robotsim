@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SCARA Robot BLE Tester</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f7f6;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            padding: 30px;
+            width: 100%;
+            max-width: 500px;
+        }
+        h2 {
+            color: #333;
+            margin-top: 0;
+            text-align: center;
+        }
+        .btn {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .btn-connect {
+            background-color: #007bff;
+            color: white;
+        }
+        .btn-connect:hover {
+            background-color: #0056b3;
+        }
+        .btn-disconnect {
+            background-color: #dc3545;
+            color: white;
+            display: none;
+        }
+        .btn-disconnect:hover {
+            background-color: #bd2130;
+        }
+        .status-box {
+            background-color: #e9ecef;
+            border-left: 4px solid #6c757d;
+            padding: 10px;
+            margin: 15px 0;
+            font-size: 14px;
+            min-height: 40px;
+            word-break: break-all;
+        }
+        .control-group {
+            margin-top: 25px;
+            border-top: 1px solid #dee2e6;
+            padding-top: 20px;
+        }
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #495057;
+        }
+        input[type="range"] {
+            width: 100%;
+            margin-bottom: 15px;
+        }
+        .value-display {
+            float: right;
+            font-weight: normal;
+            color: #28a745;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>SCARA BLE 컨트롤러</h2>
+    
+    <button id="btnConnect" class="btn btn-connect">블루투스 연결하기</button>
+    <button id="btnDisconnect" class="btn btn-disconnect">연결 해제</button>
+    
+    <div id="status" class="status-box">상태: 연결 대기 중... (HTTPS 또는 localhost 환경 필요)</div>
+    
+    <div class="control-group">
+        <label for="joint3">J3축 각도 제어 <span id="j3Value" class="value-display">0°</span></label>
+        <input type="range" id="joint3" min="0" max="180" value="0" disabled>
+    </div>
+</div>
+
+<script>
+// 무선 통신을 위한 로봇 NUS UUID 설정
+const NUS_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_RX_UUID      = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
+
+let bluetoothDevice = null;
+let rxCharacteristic = null;
+
+const btnConnect = document.getElementById('btnConnect');
+const btnDisconnect = document.getElementById('btnDisconnect');
+const statusDiv = document.getElementById('status');
+const joint3Slider = document.getElementById('joint3');
+const j3Value = document.getElementById('j3Value');
+
+// 상태 메시지 출력 함수
+function updateStatus(msg) {
+    statusDiv.innerText = "상태: " + msg;
+    console.log(msg);
+}
+
+// 1. 블루투스 장치 검색 및 연결 (주변 모든 기기를 찾도록 수정됨)
+btnConnect.addEventListener('click', async () => {
+    try {
+        updateStatus("기기 검색 중...");
+        
+        // 주변 모든 기기를 스캔하되, 우리가 쓸 NUS_SERVICE를 명시하여 연결을 허용함
+        bluetoothDevice = await navigator.bluetooth.requestDevice({
+            acceptAllDevices: true,
+            optionalServices: [NUS_SERVICE_UUID]
+        });
+        
+        updateStatus(`기기 선택됨: ${bluetoothDevice.name || '이름 없음'}. GATT 서버 연결 중...`);
+        
+        bluetoothDevice.addEventListener('gattserverdisconnected', onDisconnected);
+        
+        const server = await bluetoothDevice.gatt.connect();
+        updateStatus("GATT 서버 연결 성공. 서비스 가져오는 중...");
+        
+        const service = await server.getPrimaryService(NUS_SERVICE_UUID);
+        updateStatus("NUS 서비스 획득 성공. RX 캐릭터리스틱 가져오는 중...");
+        
+        rxCharacteristic = await service.getCharacteristic(NUS_RX_UUID);
+        updateStatus("✅ 연결 완료! 이제 슬라이더로 조작할 수 있습니다.");
+        
+        // UI 상태 전환
+        btnConnect.style.display = 'none';
+        btnDisconnect.style.display = 'block';
+        joint3Slider.disabled = false;
+        
+    } catch (error) {
+        updateStatus("❌ 오류 발생: " + error.message);
+        console.error(error);
+    }
+});
+
+// 2. 패킷 전송 로직 (AA [축] [00] [값] 55 구조)
+async function sendAnglePacket(axis, angle) {
+    if (!rxCharacteristic) return;
+    
+    try {
+        const packet = new Uint8Array(5);
+        packet[0] = 0xAA;         // 시작 바이트
+        packet[1] = axis;         // 축 번호 (예: J3축 = 3)
+        packet[2] = 0x00;         // 예비/더미 패딩
+        packet[3] = angle;        // 목표 각도 값 (PWM/Degree)
+        packet[4] = 0x55;         // 종료 바이트
+        
+        await rxCharacteristic.writeValueWithoutResponse(packet);
+        console.log(`[BLE 송신] 축:${axis}, 각도:${angle} -> 패킷:[${Array.from(packet).map(b => '0x' + b.toString(16).toUpperCase()).join(', ')}]`);
+    } catch (error) {
+        console.error("패킷 전송 실패:", error);
+    }
+}
+
+// 슬라이더 조작 이벤트 연결
+joint3Slider.addEventListener('input', (e) => {
+    const val = e.target.value;
+    j3Value.innerText = val + "°";
+    sendAnglePacket(3, parseInt(val));
+});
+
+// 3. 연결 해제 처리
+btnDisconnect.addEventListener('click', () => {
+    if (bluetoothDevice && bluetoothDevice.gatt.connected) {
+        bluetoothDevice.gatt.disconnect();
+    }
+});
+
+function onDisconnected() {
+    updateStatus("🔌 연결이 해제되었습니다.");
+    btnConnect.style.display = 'block';
+    btnDisconnect.style.display = 'none';
+    joint3Slider.disabled = true;
+    rxCharacteristic = null;
+    bluetoothDevice = null;
+}
+</script>
+</body>
+</html>
